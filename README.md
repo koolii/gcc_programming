@@ -344,7 +344,6 @@ while (!feof(stdin)) {
 
 
 
-
 ##### 蛇足
 * mountコマンドを使うと、現在使っているシステムでどのようなファイルシステムが使われているのか調べられる
 * ext4はLinuxで現在最も一般的なファイルシステム(`$ mount -t ext4`)
@@ -354,3 +353,5 @@ while (!feof(stdin)) {
 * getsは本質的にバッファーオーバーフローの欠陥があり、これを使ったワームがたくさんある
 * libcには沢山の問題をはらんでいる関数が存在するので注意
 * scanfもgetsと同様の危険があるため非推奨
+* straceコマンドで実際のプログラムがどのようなシステムコールを行っているのかわかる
+  * 普通に使うとわかりづらいのでopen,read,write,closeだけに絞ることもできる(strace -e trace=open,read,write,close ./cat data > /dev/null)みたいな感じ
