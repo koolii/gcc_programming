@@ -58,3 +58,18 @@ signal_exit(int sig)
 {
   log_exit("exit by signal %d", sig);
 }
+
+static void service(FILE *in, FILE *out, char *docroot);
+
+int
+main(int argc, char *argv[])
+{
+  if (argc != 2) {
+    fprinf(stderr, "Usage: %s <docroot>\n", argv[0]);
+    exit(1);
+  }
+
+  install_signal_handlers();
+  service(stdin, stdout, argv[1]);
+  exit(0);
+}
