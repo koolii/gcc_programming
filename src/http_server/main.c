@@ -2,6 +2,45 @@
 #include <stdlib.h>
 #include <stdarg.h>
 
+// HTTPHeaderFieldは自分自身のstructも持っており、リンクリストとなっている
+// HTTPHeaderField -> (next) -> HTTPHeaderField -> ... -> NULL
+struct HTTPHeaderField {
+  char *name;
+  char *value;
+  struct HTTPHeaderField *next;
+}
+struct HTTPRequest {
+  int protocol_minor_version;
+  char *method;
+  char *path;
+  struct HTTPHeaderField *header;
+  char *body;
+  long length;
+}
+
+// free()した時点でhは無効になっているため、h->nextを参照するとsegmentation-faultが発生する
+// 予めh->nextを取得しておかければならない
+static void
+free_request(struct HTTPRequest *req) {
+  struct HTTPHeaderField *h, *head;
+
+  head = req->head;
+  while(head) {
+    h = head;
+    // warning!!
+    head = head->next;
+    free(h->name);
+    free(h->value);
+    free(h);
+    // ERROR: ここだとエラーとなる
+    // head = head->next;
+  }
+  free(req->method);
+  free(req->path);
+  free(req->body);
+  free(req);
+}
+
 // エラーの際の標準出力処理
 static void
 log_exit(char *fmt, ...)
@@ -59,17 +98,32 @@ signal_exit(int sig)
   log_exit("exit by signal %d", sig);
 }
 
-static void service(FILE *in, FILE *out, char *docroot);
+// 今この時点でこの処理がこのなかで一番大事
+// やっていることはHTTPリクエストを展開して、reqのレスポンスをoutに書き込む
+// 今回はdocrootを書き込むことになる
+static void
+service(FILE *in, FILE *out, char *docroot)
+{
+  struct HTTPRequest *req;
+
+  // TODO
+  req = read_request(in);
+  respond_to(req, out, docroot);
+  free_request(req);
+}
 
 int
 main(int argc, char *argv[])
 {
+  // 必ずdocrootが必要
   if (argc != 2) {
     fprinf(stderr, "Usage: %s <docroot>\n", argv[0]);
     exit(1);
   }
 
+  // シグナルのハンドラを宣言
   install_signal_handlers();
+  // サービスを展開
   service(stdin, stdout, argv[1]);
   exit(0);
 }
