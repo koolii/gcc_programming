@@ -19,7 +19,32 @@
 #define LINE_BUF_SIZE 4096
 #define MAX_REQUEST_BODY_LENGTH (1024 * 1024)
 
+/****** Function Prototypes **********************************************/
 typedef void (*sighandler_t)(int);
+static void install_signal_handlers(void);
+static void trap_signal(int sig, sighandler_t handler);
+static void signal_exit(int sig);
+static void service(FILE *in, FILE *out, char *docroot);
+static struct HTTPRequest* read_request(FILE *in);
+static void read_request_line(struct HTTPRequest *req, FILE *in);
+static struct HTTPHeaderField* read_header_field(FILE *in);
+static void upcase(char *str);
+static void free_request(struct HTTPRequest *req);
+static long content_length(struct HTTPRequest *req);
+static char* lookup_header_field_value(struct HTTPRequest *req, char *name);
+static void respond_to(struct HTTPRequest *req, FILE *out, char *docroot);
+static void do_file_response(struct HTTPRequest *req, FILE *out, char *docroot);
+static void method_not_allowed(struct HTTPRequest *req, FILE *out);
+static void not_implemented(struct HTTPRequest *req, FILE *out);
+static void not_found(struct HTTPRequest *req, FILE *out);
+static void output_common_header_fields(struct HTTPRequest *req, FILE *out, char *status);
+static struct FileInfo* get_fileinfo(char *docroot, char *path);
+static char* build_fspath(char *docroot, char *path);
+static void free_fileinfo(struct FileInfo *info);
+static char* guess_content_type(struct FileInfo *info);
+static void* xmalloc(size_t sz);
+static void log_exit(char *fmt, ...);
+/****** Functions ********************************************************/
 
 // HTTPHeaderFieldは自分自身のstructも持っており、リンクリストとなっている
 // HTTPHeaderField -> (next) -> HTTPHeaderField -> ... -> NULL
@@ -36,6 +61,43 @@ struct HTTPRequest {
   char *body;
   long length;
 };
+
+// RESULT
+// ~/w/linux_system ❯❯❯ ./binary/httpd .
+// GET /src/hello.c HTTP/1.0
+//
+// HTTP/1.0 200 OK
+// Date: Mon, 27 Nov 2017 22:59:37 GMT
+// Server: LittleHTTP/1.0
+// Connection: close
+// Content-Length: 97
+// Content-Type: text/plain
+//
+// #include <stdio.h>
+//
+// int
+// main(int argc, char *argv[])
+// {
+//   printf("Hello, world\n");
+//   return 0;
+// }
+int
+main(int argc, char *argv[])
+{
+  // 必ずdocrootが必要
+  if (argc != 2) {
+    fprintf(stderr, "Usage: %s <docroot>\n", argv[0]);
+    exit(1);
+  }
+
+  // シグナルのハンドラを宣言
+  install_signal_handlers();
+  // サービスを展開
+  service(stdin, stdout, argv[1]);
+  exit(0);
+}
+
+/* ここからはHTTPRequestの処理 */
 
 // free()した時点でhは無効になっているため、h->nextを参照するとsegmentation-faultが発生する
 // 予めh->nextを取得しておかければならない
@@ -188,6 +250,35 @@ read_request_line(struct HTTPRequest *req, FILE *in)
   req->protocol_minor_version = atoi(p);
 }
 
+static char*
+lookup_header_field_value(struct HTTPRequest *req, char *name)
+{
+  struct HTTPHeaderField *h;
+
+  for (h = req->header; h; h = h->next) {
+    if (strcasecmp(h->name, name) == 0) {
+      return h->value;
+    }
+  }
+
+  return NULL;
+}
+
+static long
+content_length(struct HTTPRequest *req)
+{
+  char *val;
+  long len;
+
+  val = lookup_header_field_value(req, "Content-Length");
+  if (!val) return 0;
+
+  len = atoi(val);
+  if (len < 0) log_exit("negative Content-Length value");
+
+  return len;
+}
+
 static struct HTTPRequest*
 read_request(FILE *in)
 {
@@ -229,6 +320,16 @@ read_request(FILE *in)
   return req;
 }
 
+static void
+upcase(char *str)
+{
+  char *p;
+
+  for (p = str; *p; p++) {
+    *p = (char)toupper((int)*p);
+  }
+}
+
 // 今この時点でこの処理がこのなかで一番大事
 // やっていることはHTTPリクエストを展開して、reqのレスポンスをoutに書き込む
 // 今回はdocrootを書き込むことになる
@@ -243,18 +344,173 @@ service(FILE *in, FILE *out, char *docroot)
   free_request(req);
 }
 
-int
-main(int argc, char *argv[])
-{
-  // 必ずdocrootが必要
-  if (argc != 2) {
-    fprinf(stderr, "Usage: %s <docroot>\n", argv[0]);
-    exit(1);
-  }
+/* ここからはHTTPResponseの処理 */
+// 下記の要項を揃えてレスポンスが完成
+// ファイルの情報を得る
+// その情報に従ってレスポンスを生成する
 
-  // シグナルのハンドラを宣言
-  install_signal_handlers();
-  // サービスを展開
-  service(stdin, stdout, argv[1]);
-  exit(0);
+struct FileInfo {
+  // 絶対パス
+  char *path;
+  // ファイルサイズ
+  long size;
+  int ok;
+};
+
+static struct FileInfo*
+get_fileinfo(char *docroot, char *urlpath)
+{
+  struct FileInfo *info;
+  struct stat st;
+
+  info = xmalloc(sizeof(struct FileInfo));
+  // docrootとurlからファイルシステム上のパスを生成する
+  info->path = build_fspath(docroot, urlpath);
+  info->ok = 0;
+
+  // lstatで存在するか・そして普通のファイルか確認する
+  if (lstat(info->path, &st) < 0) return info;
+  if (!S_ISREG(st.st_mode)) return info;
+  info->ok = 1;
+  info->size = st.st_size;
+
+  return info;
+}
+
+static char *
+build_fspath(char *docroot, char *urlpath)
+{
+  char *path;
+
+  path = xmalloc(strlen(docroot) + 1 + strlen(urlpath) + 1);
+  sprintf(path, "%s%s", docroot, urlpath);
+
+  return path;
+}
+
+static void
+respond_to(struct HTTPRequest *req, FILE *out, char *docroot) {
+  if (strcmp(req->method, "GET") == 0) do_file_response(req, out, docroot);
+  else if (strcmp(req->method, "HEAD") == 0) do_file_response(req, out, docroot);
+  else if (strcmp(req->method, "POST") == 0) method_not_allowed(req, out);
+  else not_implemented(req, out);
+}
+
+static void
+do_file_response(struct HTTPRequest *req, FILE *out, char *docroot)
+{
+    struct FileInfo *info;
+
+    info = get_fileinfo(docroot, req->path);
+    if (!info->ok) {
+        free_fileinfo(info);
+        not_found(req, out);
+        return;
+    }
+    output_common_header_fields(req, out, "200 OK");
+    fprintf(out, "Content-Length: %ld\r\n", info->size);
+    fprintf(out, "Content-Type: %s\r\n", guess_content_type(info));
+    fprintf(out, "\r\n");
+    if (strcmp(req->method, "HEAD") != 0) {
+        int fd;
+        char buf[BLOCK_BUF_SIZE];
+        ssize_t n;
+
+        fd = open(info->path, O_RDONLY);
+        if (fd < 0)
+            log_exit("failed to open %s: %s", info->path, strerror(errno));
+        for (;;) {
+            n = read(fd, buf, BLOCK_BUF_SIZE);
+            if (n < 0)
+                log_exit("failed to read %s: %s", info->path, strerror(errno));
+            if (n == 0)
+                break;
+            if (fwrite(buf, 1, n, out) < n)
+                log_exit("failed to write to socket");
+        }
+        close(fd);
+    }
+    fflush(out);
+    free_fileinfo(info);
+}
+
+static void
+method_not_allowed(struct HTTPRequest *req, FILE *out)
+{
+    output_common_header_fields(req, out, "405 Method Not Allowed");
+    fprintf(out, "Content-Type: text/html\r\n");
+    fprintf(out, "\r\n");
+    fprintf(out, "<html>\r\n");
+    fprintf(out, "<header>\r\n");
+    fprintf(out, "<title>405 Method Not Allowed</title>\r\n");
+    fprintf(out, "<header>\r\n");
+    fprintf(out, "<body>\r\n");
+    fprintf(out, "<p>The request method %s is not allowed</p>\r\n", req->method);
+    fprintf(out, "</body>\r\n");
+    fprintf(out, "</html>\r\n");
+    fflush(out);
+}
+
+static void
+not_implemented(struct HTTPRequest *req, FILE *out)
+{
+    output_common_header_fields(req, out, "501 Not Implemented");
+    fprintf(out, "Content-Type: text/html\r\n");
+    fprintf(out, "\r\n");
+    fprintf(out, "<html>\r\n");
+    fprintf(out, "<header>\r\n");
+    fprintf(out, "<title>501 Not Implemented</title>\r\n");
+    fprintf(out, "<header>\r\n");
+    fprintf(out, "<body>\r\n");
+    fprintf(out, "<p>The request method %s is not implemented</p>\r\n", req->method);
+    fprintf(out, "</body>\r\n");
+    fprintf(out, "</html>\r\n");
+    fflush(out);
+}
+
+static void
+not_found(struct HTTPRequest *req, FILE *out)
+{
+    output_common_header_fields(req, out, "404 Not Found");
+    fprintf(out, "Content-Type: text/html\r\n");
+    fprintf(out, "\r\n");
+    if (strcmp(req->method, "HEAD") != 0) {
+        fprintf(out, "<html>\r\n");
+        fprintf(out, "<header><title>Not Found</title><header>\r\n");
+        fprintf(out, "<body><p>File not found</p></body>\r\n");
+        fprintf(out, "</html>\r\n");
+    }
+    fflush(out);
+}
+
+static void
+free_fileinfo(struct FileInfo *info)
+{
+    free(info->path);
+    free(info);
+}
+
+static char*
+guess_content_type(struct FileInfo *info)
+{
+    return "text/plain";   /* FIXME */
+}
+
+#define TIME_BUF_SIZE 64
+
+static void
+output_common_header_fields(struct HTTPRequest *req, FILE *out, char *status)
+{
+    time_t t;
+    struct tm *tm;
+    char buf[TIME_BUF_SIZE];
+
+    t = time(NULL);
+    tm = gmtime(&t);
+    if (!tm) log_exit("gmtime() failed: %s", strerror(errno));
+    strftime(buf, TIME_BUF_SIZE, "%a, %d %b %Y %H:%M:%S GMT", tm);
+    fprintf(out, "HTTP/1.%d %s\r\n", HTTP_MINOR_VERSION, status);
+    fprintf(out, "Date: %s\r\n", buf);
+    fprintf(out, "Server: %s/%s\r\n", SERVER_NAME, SERVER_VERSION);
+    fprintf(out, "Connection: close\r\n");
 }
