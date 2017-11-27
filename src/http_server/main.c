@@ -1,6 +1,16 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <sys/time.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <string.h>
+#include <time.h>
 #include <stdarg.h>
+#include <ctype.h>
+#include <signal.h>
 
 // HTTPHeaderFieldは自分自身のstructも持っており、リンクリストとなっている
 // HTTPHeaderField -> (next) -> HTTPHeaderField -> ... -> NULL
@@ -74,6 +84,47 @@ static void
 install_signal_handlers(void)
 {
   trap_signal(SIGPIPE, signal_exit);
+}
+
+static struct HTTPRequest*
+read_request(FILE *in)
+{
+  struct HTTPRequest *req;
+  struct HTTPHeaderField *h;
+
+  req = xmalloc(sizeof(struct HTTPRequest));
+
+  // リクエストライン ("GET /path/to/file HTTP/1/1")を読み、解析してHTTPRequestに書き込む
+  read_request_line(req, in);
+  req->head = NULL;
+
+  // リクエストヘッダを一つ読み込んでHTTPHeaderFieldを返す
+  while (h = read_header_field(in)) {
+    h->next = req->header;
+    req->header = h;
+  }
+
+  // HTTPリクエストにエンティティボディが存在するときは、
+  // クライアントがエンティティボディの長さをContent-Lengthフィールドに書くことになっている
+  // content_lengthは必ず0以上を返す
+  req->length = content_length(req);
+
+  if (req->length != 0) {
+    // サイズチェック
+    if (req->length > MAX_REQUEST_BODY_LENGTH) {
+      log_exit("request body too long");
+    }
+
+    req->body = xmalloc(req->length);
+    // freadでエンティティボディを読み込む
+    if (fread(req->body, req->length, 1, in) < 1) {
+      log_exit("failed to read request body");
+    }
+  } else {
+    req->body = NULL;
+  }
+
+  return req;
 }
 
 // 13章の内容とほぼ同じで、sigaction()を使ってsignal()と似たようなインターフェースを作る
