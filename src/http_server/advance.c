@@ -271,6 +271,42 @@ server_main(int server_fd, char *docroot)
     // いったん接続が確立したソケットは全プロセスでclose()されない限り接続が切れないので、
     // 親プロセスでclose()しないとクライアントはいつまでも待たされることになってしまう
     // (この処理は子プロセスは到達しない。なぜならpid == 0の条件の処理に入り、exit(0)で終了するから)
+    // 簡単に言うと、親プロセスはクライアントとの接続を確立して、あとの処理を子プロセスに丸投げする仕事
     close(sock);
   }
+}
+
+
+// fork()した子プロセスはwait()しなければゾンビプロセスになってしまう
+// 普通にwait()するだけでは子プロセスが終了するまでこちらは活動できなくなってしまう=fork()の意味がない
+//   1. シグナルSIGCHLDを受けたときにwait()を呼ぶ
+//   2. 一切wait()をしないことにしてしまう(自分がwait()しないとカーネルに宣言するということ)
+// 1.が正当な対策。実は子プロセスが終了するとカーネルがSIGCHLDを送信してくれることになっている
+// そのシグナルハンドラでwait()すれば即座に成功するはずなので無駄にwait()で待つことがない
+// 2.はsigaction()にSA_NOCLDWAITフラグをSIGCHLDと一緒に使うと子プロセスをゾンビにしなくなる
+// ただし、それ以降はwait()がエラーになるので注意
+// => 今回は2.の方法
+static void
+detach_children(void)
+{
+  struct sigaction act;
+
+  // SIGCHLDのシグナルハンドラとして何もしない関数noop_handlerをセットし
+  // SA_NOCLDWAITフラグをセットしてsigaction()を呼ぶ
+  // => これでwait()をしなくてもゾンビが発生しなくなる
+  act.sa_handler = noop_handler;
+  sigemptyset(&act.sa_mask);
+
+  // no child wait フラグ
+  act.sa_flags = SA_RESTART | SA_NOCLDWAIT;
+
+  if (sigaction(SIGCHLD, &act, NULL) < 0) {
+    log_exit("sigaction() failed: %s", strerror(errno));
+  }
+}
+
+static void
+noop_handler(int sig)
+{
+  ;
 }
