@@ -418,7 +418,7 @@ $mv a b
 // =
 $ ln a b
 $ rm a
-```
+```
 
 ## 11章プロセスとハードウェア
 ### 仮想CPUと仮想メモリを作り出す仕組み
@@ -634,3 +634,4 @@ intr = ^C;
   * kill -HUP `cat /var/run/xxx.pid`
   -> kill -HUP 76と同義
 * devfsとudevの違いはカーネルの一部としてのプログラムか、カーネル外のプログラムかの違い(P186)
+* https://github.com/todokr/simple-http-server はその他のプログラミング言語での実装する際に役立つかも
