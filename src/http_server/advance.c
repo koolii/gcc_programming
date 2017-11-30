@@ -251,16 +251,26 @@ server_main(int server_fd, char *docroot)
     sock = accept(server_fd, (struct sockaddr*)&addr, $addrlen);
     if (sock < 0) log_exit("accept(2) failed: %s", strerror(errno));
 
+    // あるクライアントの相手をしている間は他のことができないという状態を打破するために
+    // 並列で処理ができるようにfork()を利用する
+    // = 複数のクライアントを同時に相手にする必要がある
     pid = fork();
     if (pid < 0) exit(3);
-    if (pid == 0) {
+    if (pid == 0) { /* child process */
       FILE *inf = fdopen(sock, "r");
       FILE *out = fdopen(sock, "w");
 
+      // 子プロセスのみでリクエストを処理するようにする
       service(inf, outf, docroot);
+      // 子プロセスをexit()しないと溜まり続けてしまう
       exit(0);
     }
 
+    // accept()で得た接続済みのソケットをclose()しないと
+    // 接続済みのソケットが親プロセスにどんどん溜まってしまう
+    // いったん接続が確立したソケットは全プロセスでclose()されない限り接続が切れないので、
+    // 親プロセスでclose()しないとクライアントはいつまでも待たされることになってしまう
+    // (この処理は子プロセスは到達しない。なぜならpid == 0の条件の処理に入り、exit(0)で終了するから)
     close(sock);
   }
 }
