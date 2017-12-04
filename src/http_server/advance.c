@@ -168,8 +168,9 @@ main(int argc, char *argv[])
   // デバッグモードのときはデーモンにならず、標準入出力を端末に繋いだままで動作
   // こうしておくとエラーメッセージを標準エラー出力にかけるから
   if (!debug_mode) {
-    openlog(SERVER_NAME, LOG_PID|LOG_NDELAY, LOG_DAEMON);
+    openlog(SYSLOG_IDENT, LOG_PID|LOG_NDELAY, SYSLOG_FACILITY);
     become_daemon();
+    logging("start service");
   }
 
   server_main(server_fd, docroot);
@@ -309,4 +310,52 @@ static void
 noop_handler(int sig)
 {
   ;
+}
+
+/*
+ * 1. ファイルシステムがアンマウントできなくなるのを防ぐためにルートディレクトリに移動する
+ * (プロセスがカレントディレクトリにしているファイルシステムはアンマウントできない)
+ * 2. プロセスがうっかり標準入出力を使うことを考慮して/dev/nullにつなげる
+ * daemon(3)というシステムプロセスがあるので今回のように自分で全てをやらなくてもOK
+ */
+static void
+become_daemon(void)
+{
+  int n;
+
+  // rootディレクトリに移動
+  if (chdir("/") < 0) log_exit("chdir(2) failed: %s", strerror(errno));
+  // 標準入出力を/dev/nullにつなげる
+  freopen("/dev/null", "r", stdin);
+  freopen("/dev/null", "w", stdout);
+  freopen("/dev/null", "w", stderr);
+
+  // フォーク,_exit(0)で制御端末を切り離す
+  // これはsetsid()を確実に成功させるための余分なfork()
+  n = fork();
+  if (n < 0) log_exit("fork(2) failed: %s", strerror(errno));
+  // exit()だと全てのFILEに対してfflush()を実行するので、
+  // 1つのFILEが親プロセスと子プロセスの両方でfflush()されてしまうことがある
+  if (n != 0) _exit(0); /* 親プロセスは終了 */
+  // setsid()が重要らしい
+  if (setsid() < 0) log_exit("setsid(2) failed: %s", streerror(errno));
+}
+
+static void
+log_exit(const char *fmt, ...)
+{
+  va_list ap;
+
+  va_start(ap, fmt);
+  // デバッグ時は標準出力
+  if (debug_mode) {
+    vfprintf(stderr, fmt, ap);
+    fputc('\n', stderr);
+  } else {
+    // syslogでログファイルに出力
+    vsyslog(LOG_ERR, fmt, ap);
+  }
+
+  va_end(ap);
+  exit(1);
 }
