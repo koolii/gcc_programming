@@ -1,3 +1,5 @@
+https://github.com/aamine/stdlinux2-source
+
 # ふつうのLinuxプログラミング［第二版］Linuxの仕組みから学べるgccプログラミングの王道
 
 ## 2章OS
